@@ -1,0 +1,65 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Global Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // User Progress Rules
+    match /user_progress/{userId} {
+      function isValidProgress(data) {
+        return data.userId == request.auth.uid
+          && (data.completedTopics is map || !data.keys().hasAny(['completedTopics']))
+          && (data.lastSession is map || !data.keys().hasAny(['lastSession']));
+      }
+
+      allow get: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidProgress(incoming());
+      allow update: if isOwner(userId) && isValidProgress(incoming())
+        && incoming().diff(existing()).affectedKeys().hasOnly(['completedTopics', 'lastSession', 'notes']);
+    }
+
+    // Quiz Session Rules
+    match /quiz_sessions/{sessionId} {
+      function isValidSession(data) {
+        return data.userId == request.auth.uid
+          && data.type in ['topic', 'mock', 'combined']
+          && data.score is int
+          && data.currentQuestionIndex is int
+          && data.userAnswers is list
+          && (data.updatedAt == request.time || !data.keys().hasAny(['updatedAt']));
+      }
+
+      allow get: if isSignedIn() && existing().userId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn() && incoming().userId == request.auth.uid && isValidSession(incoming());
+      allow delete: if isSignedIn() && existing().userId == request.auth.uid;
+      allow update: if isSignedIn() && existing().userId == request.auth.uid 
+        && isValidSession(incoming())
+        && incoming().diff(existing()).affectedKeys().hasOnly(['currentQuestionIndex', 'score', 'userAnswers', 'isCompleted', 'updatedAt']);
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "LegisPlan: Estudo Jurídico Inteligente",
+  "description": "Plataforma completa de estudos para Direito Constitucional, Empresarial e Civil com explicações detalhadas, questões e simulados gerados por IA.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -1,0 +1,58 @@
+{
+  "entities": {
+    "UserProgress": {
+      "title": "User Progress",
+      "description": "Tracks the overall progress of a user across subjects and topics.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "The UID of the user." },
+        "completedTopics": { 
+          "type": "object", 
+          "description": "Mapping of subject IDs to arrays of completed topic names." 
+        },
+        "lastSession": {
+          "type": "object",
+          "properties": {
+            "view": { "type": "string" },
+            "subjectId": { "type": "string" },
+            "topicName": { "type": "string" },
+            "updatedAt": { "type": "string", "format": "date-time" }
+          }
+        },
+        "notes": {
+          "type": "object",
+          "description": "Custom user notes for topics. Keyed by 'subjectId:topicName'."
+        }
+      },
+      "required": ["userId"]
+    },
+    "QuizSession": {
+      "title": "Quiz Session",
+      "description": "Temporary state for an ongoing quiz or mock exam.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "type": { "type": "string", "enum": ["topic", "mock", "combined"] },
+        "subjectId": { "type": "string" },
+        "topicName": { "type": "string" },
+        "currentQuestionIndex": { "type": "integer" },
+        "score": { "type": "integer" },
+        "userAnswers": { "type": "array" },
+        "isCompleted": { "type": "boolean" },
+        "questions": { "type": "array", "description": "Cached questions for the session." },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "type"]
+    }
+  },
+  "firestore": {
+    "/user_progress/{userId}": {
+      "schema": "UserProgress",
+      "description": "Main progress tracking for each user."
+    },
+    "/quiz_sessions/{sessionId}": {
+      "schema": "QuizSession",
+      "description": "Persistence for active or historical quiz sessions."
+    }
+  }
+}
