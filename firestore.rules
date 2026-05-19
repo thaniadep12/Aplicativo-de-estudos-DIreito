@@ -33,13 +33,19 @@ service cloud.firestore {
       function isValidProgress(data) {
         return data.userId == request.auth.uid
           && (data.completedTopics is map || !data.keys().hasAny(['completedTopics']))
-          && (data.lastSession is map || !data.keys().hasAny(['lastSession']));
+          && (data.lastSession is map || !data.keys().hasAny(['lastSession']))
+          && (data.updatedAt == request.time || !data.keys().hasAny(['updatedAt']));
       }
 
       allow get: if isOwner(userId);
       allow create: if isOwner(userId) && isValidProgress(incoming());
-      allow update: if isOwner(userId) && isValidProgress(incoming())
-        && incoming().diff(existing()).affectedKeys().hasOnly(['completedTopics', 'lastSession', 'notes']);
+      allow update: if isOwner(userId) && isValidProgress(incoming());
+    }
+
+    // Content Cache Rules (accessible by all signed-in users for efficiency)
+    match /content_cache/{cacheId} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn();
     }
 
     // Quiz Session Rules

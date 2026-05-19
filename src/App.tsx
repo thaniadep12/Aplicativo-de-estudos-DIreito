@@ -27,7 +27,7 @@ import { subjects } from "./data/curriculum";
 import { cn } from "./lib/utils";
 import ReactMarkdown from "react-markdown";
 
-type ViewState = "subject-selection" | "topic-list" | "explanation" | "questions" | "mock-exam" | "discursive" | "dashboard";
+type ViewState = "subject-selection" | "topic-list" | "explanation" | "questions" | "mock-exam" | "discursive" | "dashboard" | "flashcards";
 
 interface Question {
   text: string;
@@ -44,7 +44,19 @@ interface DiscursiveQuestion {
 }
 
 export default function App() {
-  const { user, login, logout, getProgress, saveProgress, saveLastSession, saveNote, loading: authLoading } = useFirebase();
+  const { 
+    user, 
+    login, 
+    logout, 
+    getProgress, 
+    saveProgress, 
+    toggleProgress, 
+    saveContentCache,
+    getContentCache,
+    saveLastSession, 
+    saveNote, 
+    loading: authLoading 
+  } = useFirebase();
   const [view, setView] = useState<ViewState>("dashboard");
   const [selectedSubject, setSelectedSubject] = useState<any>(null);
   const [selectedTopic, setSelectedTopic] = useState<string>("");
@@ -52,6 +64,7 @@ export default function App() {
   const [explanation, setExplanation] = useState("");
   const [questions, setQuestions] = useState<Question[]>([]);
   const [discursiveQuestions, setDiscursiveQuestions] = useState<DiscursiveQuestion[]>([]);
+  const [flashcards, setFlashcards] = useState<{front: string; back: string}[]>([]);
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   const [score, setScore] = useState(0);
   const [showResult, setShowResult] = useState(false);
@@ -62,31 +75,63 @@ export default function App() {
   const [lastSessionData, setLastSessionData] = useState<any>(null);
   const [topicNote, setTopicNote] = useState("");
   const [isSavingNote, setIsSavingNote] = useState(false);
+  const [isFlipped, setIsFlipped] = useState(false);
+  const [currentFlashcardIndex, setCurrentFlashcardIndex] = useState(0);
+  const [quotaExceeded, setQuotaExceeded] = useState(false);
+
+  const loadUserData = async () => {
+    try {
+      const data = await getProgress();
+      if (data) {
+        setUserProgress(data);
+        if (data.lastSession) {
+          setLastSessionData(data.lastSession);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to load user data:", err);
+    }
+  };
 
   // Load progress on user state change
   useEffect(() => {
     if (user) {
       loadUserData();
+    } else if (!authLoading) {
+      // Clear progress if no user
+      setUserProgress(null);
+      setLastSessionData(null);
     }
-  }, [user]);
+  }, [user, authLoading]);
 
-  const loadUserData = async () => {
-    const data = await getProgress();
-    if (data) {
-      setUserProgress(data);
-      if (data.lastSession) {
-        setLastSessionData(data.lastSession);
-      }
-    }
-  };
+  // Scroll to top on view change
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [view]);
 
   const resumeLastSession = () => {
     if (lastSessionData) {
       const lastView = lastSessionData.view as ViewState;
       const sub = subjects.find(s => s.id === lastSessionData.subjectId);
-      if (sub) setSelectedSubject(sub);
-      if (lastSessionData.topicName) setSelectedTopic(lastSessionData.topicName);
-      setView(lastView);
+      if (sub) {
+        setSelectedSubject(sub);
+        if (lastSessionData.topicName) {
+          setSelectedTopic(lastSessionData.topicName);
+          if (lastView === "explanation") {
+            fetchExplanation(lastSessionData.topicName, undefined, sub.name, sub.id);
+          } else if (lastView === "questions") {
+            fetchQuestions(lastSessionData.topicName, undefined, sub.name, sub.id);
+          } else if (lastView === "discursive") {
+            fetchDiscursive(lastSessionData.topicName, undefined, sub.name, sub.id);
+          } else if (lastView === "flashcards") {
+            startFlashcards(lastSessionData.topicName, undefined, sub.name, sub.id);
+          }
+        }
+        setView(lastView);
+      } else {
+        // Fallback to dashboard if subject not found
+        setView("dashboard");
+      }
     }
   };
 
@@ -100,70 +145,206 @@ export default function App() {
     syncSession("topic-list", subject.id);
   };
 
-  const fetchExplanation = async (topic: string, description?: string) => {
+  const fetchExplanation = async (topic: string, description?: string, subjectName?: string, subjectId?: string) => {
     setLoading(true);
     setView("explanation");
     setSelectedTopic(topic);
+    setExplanation(""); 
+    setQuotaExceeded(false);
+    const sName = subjectName || selectedSubject?.name;
+    const sId = subjectId || selectedSubject?.id;
     syncSession("explanation", undefined, topic);
+    
     try {
+      if (sId) {
+        const cached = await getContentCache(sId, topic, "explanation");
+        if (cached) {
+          setExplanation(cached);
+          setLoading(false);
+          return;
+        }
+      }
+
       const res = await fetch("/api/generate-content", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ subject: selectedSubject.name, topic, description, type: "explanation" })
+        body: JSON.stringify({ 
+          subject: sName, 
+          topic, 
+          description, 
+          type: "explanation" 
+        })
       });
-      const data = await res.json();
-      setExplanation(data.content);
-    } catch (e) {
-      console.error(e);
+      
+      let data;
+      try {
+        data = await res.json();
+      } catch (jsonErr) {
+        throw new Error("Erro de comunicação com o servidor. Tente novamente.");
+      }
+
+      if (!res.ok) {
+        if (res.status === 429) setQuotaExceeded(true);
+        throw new Error(data.error || "Falha na resposta do servidor");
+      }
+      setExplanation(data.content || "");
+      if (sId && data.content) {
+        saveContentCache(sId, topic, "explanation", data.content);
+      }
+    } catch (e: any) {
+      console.error("Fetch Explanation Error:", e);
+      setExplanation("");
     } finally {
       setLoading(false);
     }
   };
 
-  const fetchQuestions = async (topic: string, description?: string) => {
+  const handleToggleCompletion = async (subjectId: string, topicName: string) => {
+    if (!user) return;
+    const isCurrentlyCompleted = userProgress?.completedTopics?.[subjectId]?.includes(topicName);
+    const newState = !isCurrentlyCompleted;
+    
+    // Optimistic local update
+    setUserProgress((prev: any) => {
+      const currentCompleted = prev?.completedTopics?.[subjectId] || [];
+      const updatedTopics = newState 
+        ? Array.from(new Set([...currentCompleted, topicName]))
+        : currentCompleted.filter((t: string) => t !== topicName);
+      
+      return {
+        ...prev,
+        completedTopics: {
+          ...(prev?.completedTopics || {}),
+          [subjectId]: updatedTopics
+        }
+      };
+    });
+
+    try {
+      await toggleProgress(subjectId, topicName, newState);
+    } catch (err) {
+      console.error("Toggle progress failed", err);
+      // Revert on error
+      loadUserData();
+    }
+  };
+
+  const fetchQuestions = async (topic: string, description?: string, subjectName?: string, subjectId?: string) => {
     setLoading(true);
     setView("questions");
     setSelectedTopic(topic);
+    setQuestions([]);
+    setQuotaExceeded(false);
+    const sName = subjectName || selectedSubject?.name;
+    const sId = subjectId || selectedSubject?.id;
     setScore(0);
     setCurrentQuestionIndex(0);
     setShowResult(false);
     setUserAnswer(null);
     setDiscursiveMock(null);
     syncSession("questions", undefined, topic);
+    
     try {
+      if (sId) {
+        const cached = await getContentCache(sId, topic, "questions");
+        if (cached) {
+          setQuestions(cached);
+          setLoading(false);
+          return;
+        }
+      }
+
       const res = await fetch("/api/generate-content", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ subject: selectedSubject.name, topic, description, type: "questions" })
+        body: JSON.stringify({ subject: sName, topic, description, type: "questions" })
       });
-      const data = await res.json();
-      const parsed = JSON.parse(data.content);
-      setQuestions(parsed.questions);
+      
+      let data;
+      try {
+        data = await res.json();
+      } catch (jsonErr) {
+        throw new Error("Erro de rede ao carregar questões.");
+      }
+
+      if (!res.ok) {
+        if (res.status === 429) setQuotaExceeded(true);
+        throw new Error(data.error || "Falha ao carregar questões");
+      }
+      
+      try {
+        const parsed = JSON.parse(data.content);
+        const qData = parsed.questions || [];
+        setQuestions(qData);
+        if (sId && qData.length > 0) {
+          saveContentCache(sId, topic, "questions", qData);
+        }
+      } catch (parseErr) {
+        console.error("Parse Questions Error:", parseErr);
+        throw new Error("Erro ao processar as questões geradas pela IA.");
+      }
     } catch (e) {
       console.error(e);
+      setQuestions([]);
     } finally {
       setLoading(false);
     }
   };
 
-  const fetchDiscursive = async (topic: string, description?: string) => {
+  const fetchDiscursive = async (topic: string, description?: string, subjectName?: string, subjectId?: string) => {
     setLoading(true);
     setView("discursive");
     setSelectedTopic(topic);
+    setDiscursiveQuestions([]);
+    setQuotaExceeded(false);
+    const sName = subjectName || selectedSubject?.name;
+    const sId = subjectId || selectedSubject?.id;
     setShowExpectedAnswer(false);
     setCurrentQuestionIndex(0);
     syncSession("discursive", undefined, topic);
+    
     try {
+      if (sId) {
+        const cached = await getContentCache(sId, topic, "discursive");
+        if (cached) {
+          setDiscursiveQuestions(cached);
+          setLoading(false);
+          return;
+        }
+      }
+
       const res = await fetch("/api/generate-content", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ subject: selectedSubject.name, topic, description, type: "discursive" })
+        body: JSON.stringify({ subject: sName, topic, description, type: "discursive" })
       });
-      const data = await res.json();
-      const parsed = JSON.parse(data.content);
-      setDiscursiveQuestions(parsed.questions);
+      
+      let data;
+      try {
+        data = await res.json();
+      } catch (jsonErr) {
+        throw new Error("Erro ao carregar dados do servidor.");
+      }
+
+      if (!res.ok) {
+        if (res.status === 429) setQuotaExceeded(true);
+        throw new Error(data.error || "Falha ao carregar questões discursivas");
+      }
+      
+      try {
+        const parsed = JSON.parse(data.content);
+        const dData = parsed.questions || [];
+        setDiscursiveQuestions(dData);
+        if (sId && dData.length > 0) {
+          saveContentCache(sId, topic, "discursive", dData);
+        }
+      } catch (parseErr) {
+        console.error("Parse Discursive Error:", parseErr);
+        throw new Error("Erro no formato das questões discursivas.");
+      }
     } catch (e) {
       console.error(e);
+      setDiscursiveQuestions([]);
     } finally {
       setLoading(false);
     }
@@ -176,18 +357,50 @@ export default function App() {
     setCurrentQuestionIndex(0);
     setShowResult(false);
     setUserAnswer(null);
+    setQuotaExceeded(false);
+    
     try {
+      if (selectedSubject?.id) {
+        const cached = await getContentCache(selectedSubject.id, "subject_mock", "mock-exam");
+        if (cached) {
+          setQuestions(cached.questions || []);
+          setDiscursiveMock(cached.discursive || null);
+          setLoading(false);
+          return;
+        }
+      }
+
       const res = await fetch("/api/generate-content", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ subject: selectedSubject.name, type: "mock-exam" })
       });
-      const data = await res.json();
+      
+      let data;
+      try {
+        data = await res.json();
+      } catch (jsonErr) {
+        throw new Error("Erro ao carregar simulado.");
+      }
+
+      if (!res.ok) {
+        if (res.status === 429) setQuotaExceeded(true);
+        throw new Error(data.error || "Falha ao gerar simulado");
+      }
+
       const parsed = JSON.parse(data.content);
-      setQuestions(parsed.questions);
-      setDiscursiveMock(parsed.discursive);
+      setQuestions(parsed.questions || []);
+      setDiscursiveMock(parsed.discursive || null);
+
+      if (selectedSubject?.id && parsed.questions) {
+        saveContentCache(selectedSubject.id, "subject_mock", "mock-exam", {
+          questions: parsed.questions,
+          discursive: parsed.discursive
+        });
+      }
     } catch (e) {
       console.error(e);
+      setQuestions([]);
     } finally {
       setLoading(false);
     }
@@ -200,18 +413,111 @@ export default function App() {
     setCurrentQuestionIndex(0);
     setShowResult(false);
     setUserAnswer(null);
+    setQuotaExceeded(false);
+
     try {
+      const cached = await getContentCache("global", "combined_mock", "combined-mock");
+      if (cached) {
+        setQuestions(cached.questions || []);
+        setDiscursiveMock(cached.discursive || null);
+        setLoading(false);
+        return;
+      }
+
       const res = await fetch("/api/generate-content", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ type: "combined-mock" })
       });
-      const data = await res.json();
+      
+      let data;
+      try {
+        data = await res.json();
+      } catch (jsonErr) {
+        throw new Error("Erro ao carregar simulado interdisciplinar.");
+      }
+
+      if (!res.ok) {
+        if (res.status === 429) setQuotaExceeded(true);
+        throw new Error(data.error || "Falha ao gerar simulado interdisciplinar");
+      }
+
       const parsed = JSON.parse(data.content);
-      setQuestions(parsed.questions);
-      setDiscursiveMock(parsed.discursive);
+      setQuestions(parsed.questions || []);
+      setDiscursiveMock(parsed.discursive || null);
+
+      if (parsed.questions) {
+        saveContentCache("global", "combined_mock", "combined-mock", {
+          questions: parsed.questions,
+          discursive: parsed.discursive
+        });
+      }
     } catch (e) {
       console.error(e);
+      setQuestions([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const startFlashcards = async (topic: string, description?: string, subjectName?: string, subjectId?: string) => {
+    setLoading(true);
+    setView("flashcards");
+    setSelectedTopic(topic);
+    setFlashcards([]);
+    setCurrentFlashcardIndex(0);
+    setIsFlipped(false);
+    setQuotaExceeded(false);
+    const sName = subjectName || selectedSubject?.name;
+    const sId = subjectId || selectedSubject?.id;
+    syncSession("flashcards", undefined, topic);
+
+    try {
+      if (sId) {
+        const cached = await getContentCache(sId, topic, "flashcards");
+        if (cached) {
+          setFlashcards(cached);
+          setLoading(false);
+          return;
+        }
+      }
+
+      // Check for static data as fallback before AI
+      const topicData = subjects.find(s => s.id === sId)?.topics.find((t: any) => t.name === topic);
+      if (topicData?.flashcards && topicData.flashcards.length > 0) {
+        setFlashcards(topicData.flashcards);
+        setLoading(false);
+        return;
+      }
+
+      const res = await fetch("/api/generate-content", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subject: sName, topic, description, type: "flashcards" })
+      });
+
+      let data;
+      try {
+        data = await res.json();
+      } catch (jsonErr) {
+        throw new Error("Erro de conexão ao carregar flashcards.");
+      }
+
+      if (!res.ok) {
+        if (res.status === 429) setQuotaExceeded(true);
+        throw new Error(data.error || "Falha ao gerar flashcards");
+      }
+
+      const parsed = JSON.parse(data.content);
+      const fData = parsed.flashcards || [];
+      setFlashcards(fData);
+      
+      if (sId && fData.length > 0) {
+        saveContentCache(sId, topic, "flashcards", fData);
+      }
+    } catch (e) {
+      console.error("Flashcards Error:", e);
+      setFlashcards([]);
     } finally {
       setLoading(false);
     }
@@ -232,8 +538,20 @@ export default function App() {
     } else {
       setShowResult(true);
       if (view === "questions" && selectedSubject && selectedTopic) {
+        // Optimistic update for quiz completion
+        setUserProgress((prev: any) => {
+          const currentCompleted = prev?.completedTopics?.[selectedSubject.id] || [];
+          if (currentCompleted.includes(selectedTopic)) return prev;
+          
+          return {
+            ...prev,
+            completedTopics: {
+              ...(prev?.completedTopics || {}),
+              [selectedSubject.id]: Array.from(new Set([...currentCompleted, selectedTopic]))
+            }
+          };
+        });
         saveProgress(selectedSubject.id, selectedTopic);
-        loadUserData(); // Refresh local progress
       }
     }
   };
@@ -382,10 +700,14 @@ export default function App() {
       {/* Main Content Area */}
       <main className="flex-1 flex flex-col min-w-0">
         {/* Top Header */}
-        <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-8 sticky top-0 z-30">
+        <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-4 sm:px-8 sticky top-0 z-30">
           <div className="flex items-center gap-4">
-            <span className="hidden sm:inline text-slate-400 font-medium text-sm">Bem-vindo, {user.displayName?.split(' ')[0]}</span>
-            <span className="bg-blue-50 text-blue-700 text-[10px] font-black px-3 py-1 rounded-full border border-blue-100 uppercase tracking-wider">
+            <div className="lg:hidden flex items-center gap-2" onClick={() => { setView("subject-selection"); syncSession("subject-selection"); }}>
+               <div className="w-2 h-5 bg-blue-500 rounded-sm"></div>
+               <h1 className="text-sm font-black tracking-tight uppercase">LP</h1>
+            </div>
+            <span className="hidden sm:inline text-slate-400 font-medium text-sm">Olá, {user.displayName?.split(' ')[0]}</span>
+            <span className="hidden xs:inline bg-blue-50 text-blue-700 text-[10px] font-black px-2 sm:px-3 py-1 rounded-full border border-blue-100 uppercase tracking-wider truncate max-w-[120px] sm:max-w-none">
               {user.email}
             </span>
           </div>
@@ -414,38 +736,38 @@ export default function App() {
                 className="space-y-12 max-w-7xl mx-auto"
               >
                 {/* Dashboard Header & Summary Stats (Full Width) */}
-                <div className="bg-slate-900 rounded-[2.5rem] p-10 text-white relative overflow-hidden shadow-2xl">
+                <div className="bg-slate-900 rounded-3xl sm:rounded-[2.5rem] p-5 sm:p-10 text-white relative overflow-hidden shadow-2xl">
                    <div className="absolute top-0 right-0 w-1/2 h-full bg-gradient-to-l from-blue-600/20 to-transparent"></div>
-                   <div className="relative z-10 flex flex-col md:flex-row justify-between items-center gap-8">
-                      <div className="space-y-4 text-center md:text-left">
-                        <h2 className="text-4xl md:text-5xl font-black tracking-tighter">Olá, {user.displayName?.split(' ')[0]}!</h2>
-                        <p className="text-slate-300 font-medium text-lg">Seu ciclo de estudos está em {globalProgress}% de conclusão.</p>
+                   <div className="relative z-10 flex flex-col md:flex-row justify-between items-center gap-6 sm:gap-8 text-center md:text-left">
+                      <div className="space-y-3 sm:space-y-4 w-full">
+                        <h2 className="text-2xl sm:text-4xl md:text-5xl font-black tracking-tighter">Olá, {user.displayName?.split(' ')[0] || 'Estudante'}!</h2>
+                        <p className="text-slate-300 font-medium text-sm sm:text-lg">Progresso: {globalProgress}% concluído.</p>
                         {lastSessionData && (
                           <motion.button 
-                            whileHover={{ scale: 1.05 }}
-                            whileTap={{ scale: 0.95 }}
+                            whileHover={{ scale: 1.02 }}
+                            whileTap={{ scale: 0.98 }}
                             onClick={resumeLastSession}
-                            className="bg-blue-600 text-white px-8 py-4 rounded-2xl flex items-center gap-3 font-black text-sm uppercase tracking-widest shadow-xl shadow-blue-900/40 border border-blue-500 mt-4 group mx-auto md:mx-0"
+                            className="bg-blue-600 text-white w-full sm:w-auto px-5 sm:px-8 py-3 sm:py-4 rounded-xl sm:rounded-2xl flex items-center justify-center gap-3 font-black text-[10px] sm:text-sm uppercase tracking-widest shadow-xl shadow-blue-900/40 border border-blue-500 mt-2 sm:mt-4 group"
                           >
-                            <RefreshCcw className="w-5 h-5 group-hover:rotate-180 transition-transform duration-700" />
-                            Continuar de onde parou
+                            <RefreshCcw className="w-4 h-4 sm:w-5 h-5 group-hover:rotate-180 transition-transform duration-700" />
+                            Continuar Estudo
                           </motion.button>
                         )}
                       </div>
-                      <div className="flex items-center gap-8 bg-white/5 backdrop-blur-md p-8 rounded-3xl border border-white/10 shrink-0">
+                      <div className="flex items-center gap-3 sm:gap-8 bg-white/5 backdrop-blur-md p-4 sm:p-8 rounded-2xl sm:rounded-3xl border border-white/10 w-full md:w-auto justify-around sm:justify-start mt-2 md:mt-0">
                          <div className="text-center">
-                            <div className="text-4xl font-black text-white">{completedCount}</div>
-                            <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mt-1">Temas</div>
+                            <div className="text-xl sm:text-4xl font-black text-white">{completedCount}</div>
+                            <div className="text-[8px] sm:text-[10px] font-black text-slate-400 uppercase tracking-widest mt-1">Temas</div>
                          </div>
-                         <div className="w-px h-12 bg-white/10"></div>
+                         <div className="w-px h-6 sm:h-12 bg-white/10"></div>
                          <div className="text-center">
-                            <div className="text-4xl font-black text-blue-400">{globalProgress}%</div>
-                            <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mt-1">Geral</div>
+                            <div className="text-xl sm:text-4xl font-black text-blue-400">{globalProgress}%</div>
+                            <div className="text-[8px] sm:text-[10px] font-black text-slate-400 uppercase tracking-widest mt-1">Geral</div>
                          </div>
-                         <div className="w-px h-12 bg-white/10"></div>
+                         <div className="w-px h-6 sm:h-12 bg-white/10"></div>
                          <div className="text-center">
-                            <div className="text-4xl font-black text-emerald-400">#142</div>
-                            <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mt-1">Ranking</div>
+                            <div className="text-xl sm:text-4xl font-black text-emerald-400">#142</div>
+                            <div className="text-[8px] sm:text-[10px] font-black text-slate-400 uppercase tracking-widest mt-1">Rank</div>
                          </div>
                       </div>
                    </div>
@@ -453,9 +775,9 @@ export default function App() {
 
                 <div className="grid lg:grid-cols-3 gap-8">
                   {/* Detailed Progress by Subject */}
-                  <div className="lg:col-span-2 bg-white border border-slate-200 rounded-[2.5rem] p-10 shadow-sm">
-                    <div className="flex justify-between items-center mb-10">
-                       <h3 className="text-2xl font-black tracking-tight">Desempenho por Disciplina</h3>
+                  <div className="lg:col-span-2 bg-white border border-slate-200 rounded-3xl sm:rounded-[2.5rem] p-6 sm:p-10 shadow-sm">
+                    <div className="flex justify-between items-center mb-6 sm:mb-10">
+                       <h3 className="text-xl sm:text-2xl font-black tracking-tight">Desempenho por Disciplina</h3>
                        <Trophy className="w-6 h-6 text-yellow-500" />
                     </div>
                     <div className="grid md:grid-cols-2 gap-x-12 gap-y-10">
@@ -649,30 +971,143 @@ export default function App() {
                               </span>
                             )}
                           </div>
-                          <div className="flex gap-3 opacity-0 group-hover:opacity-100 transition-all transform translate-x-2 group-hover:translate-x-0">
+                          <div className={cn(
+                            "flex gap-2 sm:gap-3 flex-wrap justify-end",
+                            "opacity-100 lg:opacity-0 lg:group-hover:opacity-100 transition-all transform translate-x-0 lg:translate-x-2 lg:group-hover:translate-x-0"
+                          )}>
                             <button 
-                              onClick={() => fetchExplanation(topic.name, topic.description)}
-                              className="text-[10px] font-black uppercase tracking-widest px-3 py-1.5 rounded-lg border border-slate-200 text-slate-400 hover:text-blue-600 hover:border-blue-200 hover:bg-white transition-all"
+                              onClick={() => fetchExplanation(topic.name, topic.description, selectedSubject?.name)}
+                              className="text-[9px] sm:text-[10px] font-black uppercase tracking-widest px-2 sm:px-3 py-1.5 rounded-lg border border-slate-200 text-slate-500 hover:text-blue-600 hover:border-blue-200 hover:bg-white transition-all bg-white"
                             >
                               Doutrina
                             </button>
                             <button 
-                              onClick={() => fetchQuestions(topic.name, topic.description)}
-                              className="text-[10px] font-black uppercase tracking-widest px-3 py-1.5 rounded-lg border border-slate-200 text-slate-400 hover:text-indigo-600 hover:border-indigo-200 hover:bg-white transition-all"
+                              onClick={() => fetchQuestions(topic.name, topic.description, selectedSubject?.name)}
+                              className="text-[9px] sm:text-[10px] font-black uppercase tracking-widest px-2 sm:px-3 py-1.5 rounded-lg border border-slate-200 text-slate-500 hover:text-indigo-600 hover:border-indigo-200 hover:bg-white transition-all bg-white"
                             >
                               Questões
                             </button>
                             <button 
-                              onClick={() => fetchDiscursive(topic.name, topic.description)}
-                              className="text-[10px] font-black uppercase tracking-widest px-3 py-1.5 rounded-lg border border-slate-200 text-slate-400 hover:text-emerald-600 hover:border-emerald-200 hover:bg-white transition-all"
+                              onClick={() => startFlashcards(topic.name, topic.description, selectedSubject?.name, selectedSubject?.id)}
+                              className="text-[9px] sm:text-[10px] font-black uppercase tracking-widest px-2 sm:px-3 py-1.5 rounded-lg border border-slate-200 text-slate-500 hover:text-orange-600 hover:border-orange-200 hover:bg-white transition-all bg-white"
                             >
-                              Discursiva
+                              Cards
+                            </button>
+                            <button 
+                              onClick={() => handleToggleCompletion(selectedSubject.id, topic.name)}
+                              className={cn(
+                                "text-[9px] sm:text-[10px] font-black uppercase tracking-widest px-2 sm:px-3 py-1.5 rounded-lg border transition-all flex items-center gap-1.5",
+                                isCompleted 
+                                  ? "bg-emerald-600 border-emerald-600 text-white" 
+                                  : "bg-white border-slate-200 text-slate-500 hover:text-emerald-600 hover:border-emerald-200 hover:bg-emerald-50"
+                              )}
+                            >
+                              {isCompleted ? <CheckCircle2 className="w-3 h-3" /> : <div className="w-3 h-3 border border-current rounded-full" />}
+                              {isCompleted ? "Concluído" : "Concluir"}
                             </button>
                           </div>
                         </div>
                       );
                     })}
                   </div>
+                </div>
+              </motion.div>
+            )}
+
+            {view === "flashcards" && (
+              <motion.div
+                key="flashcards"
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="max-w-xl mx-auto space-y-8"
+              >
+                <div className="flex items-center gap-4">
+                  <button onClick={() => setView("topic-list")} className="p-2.5 hover:bg-slate-200 rounded-xl transition-all">
+                    <ArrowLeft className="w-5 h-5" />
+                  </button>
+                  <div>
+                    <div className="text-[10px] font-black text-orange-600 uppercase tracking-widest mb-0.5">Memorização Ativa</div>
+                    <h2 className="text-xl font-black text-slate-900">{selectedTopic}</h2>
+                  </div>
+                </div>
+
+                <div className="perspective-1000 h-[350px] relative">
+                  {loading ? (
+                    <div className="w-full h-full bg-white border-2 border-slate-100 rounded-[2.5rem] flex flex-col items-center justify-center p-10 text-center animate-pulse">
+                      <Loader2 className="w-10 h-10 text-orange-400 animate-spin mb-4" />
+                      <p className="text-slate-400 font-bold uppercase tracking-widest text-[10px]">Gerando Cards Memorizáveis...</p>
+                    </div>
+                  ) : flashcards.length === 0 ? (
+                    <div className="w-full h-full bg-white border-2 border-slate-200 rounded-[2.5rem] flex flex-col items-center justify-center p-10 text-center">
+                       <HelpCircle className="w-10 h-10 text-slate-300 mb-4" />
+                       <h3 className="font-bold text-slate-800 mb-2">Cards Indisponíveis</h3>
+                       <p className="text-slate-400 text-xs italic mb-6">
+                         {quotaExceeded ? "Limite de geração de novos cards atingido por hoje." : "Não conseguimos carregar os cards para este tema."}
+                       </p>
+                       <button 
+                        onClick={() => startFlashcards(selectedTopic, undefined, selectedSubject?.name)}
+                        className="text-blue-600 font-black uppercase text-[10px] tracking-widest hover:underline"
+                       >
+                         Tentar Novamente
+                       </button>
+                    </div>
+                  ) : (
+                    <motion.div
+                      animate={{ rotateY: isFlipped ? 180 : 0 }}
+                      transition={{ duration: 0.6, type: "spring", stiffness: 260, damping: 20 }}
+                      onClick={() => setIsFlipped(!isFlipped)}
+                      style={{ transformStyle: "preserve-3d" }}
+                      className="w-full h-full cursor-pointer relative"
+                    >
+                      {/* Front */}
+                      <div 
+                        className="absolute inset-0 w-full h-full backface-hidden bg-white border-2 border-slate-200 rounded-[2.5rem] shadow-xl p-10 flex flex-col items-center justify-center text-center group"
+                        style={{ backfaceVisibility: "hidden" }}
+                      >
+                        <div className="absolute top-6 left-1/2 -translate-x-1/2 text-[10px] font-black text-slate-300 uppercase tracking-widest font-mono">Lado A: Pergunta</div>
+                        <p className="text-2xl font-black text-slate-900 leading-tight">
+                          {flashcards[currentFlashcardIndex]?.front}
+                        </p>
+                        <div className="absolute bottom-6 text-[10px] font-black text-blue-500 uppercase tracking-widest opacity-0 group-hover:opacity-100 transition-opacity">Toque para ver a resposta</div>
+                      </div>
+
+                      {/* Back */}
+                      <div 
+                        className="absolute inset-0 w-full h-full backface-hidden bg-slate-900 border-2 border-slate-800 rounded-[2.5rem] shadow-xl p-10 flex flex-col items-center justify-center text-center text-white"
+                        style={{ backfaceVisibility: "hidden", transform: "rotateY(180deg)" }}
+                      >
+                         <div className="absolute top-6 left-1/2 -translate-x-1/2 text-[10px] font-black text-slate-500 uppercase tracking-widest font-mono">Lado B: Resposta</div>
+                         <p className="text-xl font-medium leading-relaxed">
+                          {flashcards[currentFlashcardIndex]?.back}
+                         </p>
+                      </div>
+                    </motion.div>
+                  )}
+                </div>
+
+                <div className="flex items-center justify-between gap-6">
+                  <button 
+                    disabled={currentFlashcardIndex === 0 || loading}
+                    onClick={() => { setCurrentFlashcardIndex(i=>i-1); setIsFlipped(false); }}
+                    className="flex-1 py-4 bg-white border border-slate-200 rounded-2xl font-black text-xs uppercase tracking-widest text-slate-500 disabled:opacity-30 hover:bg-slate-50 transition-all shadow-sm"
+                  >
+                    Anterior
+                  </button>
+                  <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                    {flashcards.length > 0 ? `${currentFlashcardIndex + 1} / ${flashcards.length}` : "0 / 0"}
+                  </div>
+                  <button 
+                    disabled={currentFlashcardIndex === (flashcards.length || 1) - 1 || loading}
+                    onClick={() => { setCurrentFlashcardIndex(i=>i+1); setIsFlipped(false); }}
+                    className="flex-1 py-4 bg-slate-900 text-white rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-slate-800 transition-all shadow-lg disabled:opacity-30"
+                  >
+                    Próximo
+                  </button>
+                </div>
+
+                <div className="bg-orange-50 border border-orange-100 rounded-2xl p-6 text-center">
+                   <p className="text-orange-700 text-xs font-semibold">Dica: Tente responder mentalmente antes de virar o card para máxima retenção.</p>
                 </div>
               </motion.div>
             )}
@@ -693,7 +1128,7 @@ export default function App() {
                     <div>
                       <div className="flex items-center gap-2 mb-1">
                         <span className="px-2 py-0.5 bg-blue-100 text-blue-700 text-[10px] font-black uppercase rounded tracking-widest">Doutrina</span>
-                        <span className="text-slate-400 font-bold text-[10px] uppercase tracking-widest">• {selectedSubject.name}</span>
+                        <span className="text-slate-400 font-bold text-[10px] uppercase tracking-widest">• {selectedSubject?.name}</span>
                       </div>
                       <h2 className="text-2xl font-black text-slate-900">{selectedTopic}</h2>
                     </div>
@@ -705,6 +1140,23 @@ export default function App() {
                     Testar Conhecimento
                   </button>
                 </div>
+
+                {!loading && (
+                  <div className="flex gap-3">
+                    <button 
+                      onClick={() => handleToggleCompletion(selectedSubject.id, selectedTopic)}
+                      className={cn(
+                        "flex items-center gap-2 px-6 py-3 rounded-xl text-xs sm:text-sm font-black uppercase tracking-widest transition-all shadow-lg",
+                        userProgress?.completedTopics?.[selectedSubject.id]?.includes(selectedTopic) 
+                          ? "bg-emerald-600 text-white" 
+                          : "bg-white text-emerald-600 border border-emerald-100 hover:bg-emerald-50"
+                      )}
+                    >
+                      {userProgress?.completedTopics?.[selectedSubject.id]?.includes(selectedTopic) ? <CheckCircle2 className="w-4 h-4" /> : <CheckCircle2 className="w-4 h-4 opacity-50" />}
+                      {userProgress?.completedTopics?.[selectedSubject.id]?.includes(selectedTopic) ? "Concluído" : "Marcar como Concluído"}
+                    </button>
+                  </div>
+                )}
 
                 <div className={cn(
                   "bg-white border border-slate-200 rounded-3xl p-8 md:p-14 shadow-sm min-h-[500px]",
@@ -720,7 +1172,39 @@ export default function App() {
                     </div>
                   ) : (
                     <div className="prose prose-slate prose-lg max-w-none prose-headings:font-black prose-headings:tracking-tight prose-strong:text-slate-900 prose-blockquote:border-blue-500 prose-blockquote:bg-slate-50 prose-blockquote:py-1 prose-blockquote:rounded-r-lg">
-                      <ReactMarkdown>{explanation}</ReactMarkdown>
+                      {explanation ? (
+                        <ReactMarkdown>{explanation}</ReactMarkdown>
+                      ) : (
+                        <div className="text-center py-20 px-6">
+                          <div className={cn(
+                            "w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4",
+                            quotaExceeded ? "bg-amber-100 text-amber-600" : "bg-slate-100 text-slate-400"
+                          )}>
+                            {quotaExceeded ? <Sparkles className="w-8 h-8" /> : <BookOpen className="w-8 h-8" />}
+                          </div>
+                          <h3 className="text-lg font-bold text-slate-800 mb-2">
+                            {quotaExceeded ? "Limite Diário Atingido" : "Conteúdo não disponível"}
+                          </h3>
+                          <p className="text-slate-400 italic max-w-md mx-auto">
+                            {quotaExceeded 
+                              ? "Você atingiu o limite de novas gerações da Inteligência Artificial por hoje. Como este é um ambiente de testes, os recursos são limitados."
+                              : "Houve um erro ao carregar este conteúdo. Por favor, verifique sua conexão ou tente novamente."
+                            }
+                          </p>
+                          {quotaExceeded && (
+                            <p className="mt-4 text-xs text-slate-500 font-medium">
+                              DICA: Todo conteúdo que você já abriu anteriormente continuará funcionando normalmente pois está salvo em cache!
+                            </p>
+                          )}
+                          <button 
+                            onClick={() => fetchExplanation(selectedTopic, undefined, selectedSubject?.name)}
+                            className="mt-6 text-blue-600 font-black uppercase text-xs tracking-widest hover:underline flex items-center gap-2 mx-auto"
+                          >
+                            <RefreshCcw className="w-4 h-4" />
+                            Tentar novamente
+                          </button>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -729,27 +1213,27 @@ export default function App() {
                   <motion.div
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
-                    className="bg-white border border-slate-200 rounded-3xl p-8 shadow-sm"
+                    className="bg-white border border-slate-200 rounded-3xl p-6 sm:p-8 shadow-sm"
                   >
                     <div className="flex items-center justify-between mb-6">
-                      <h3 className="text-lg font-black text-slate-800 flex items-center gap-2">
+                      <h3 className="text-base sm:text-lg font-black text-slate-800 flex items-center gap-2">
                          <Sparkles className="w-5 h-5 text-blue-500" /> Minhas Anotações
                       </h3>
                       {userProgress?.notes?.[`${selectedSubject.id}___${selectedTopic.replace(/\./g, '_')}`] && (
-                        <span className="text-[10px] font-black text-emerald-600 bg-emerald-50 px-2 py-1 rounded-lg uppercase tracking-widest">Salvo no Cloud</span>
+                        <span className="text-[9px] sm:text-[10px] font-black text-emerald-600 bg-emerald-50 px-2 py-1 rounded-lg uppercase tracking-widest">Salvo</span>
                       )}
                     </div>
                     <textarea
                       value={topicNote}
                       onChange={(e) => setTopicNote(e.target.value)}
-                      placeholder="Escreva aqui seus resumos, mnemônicos e pontos importantes deste tema..."
-                      className="w-full min-h-[200px] p-6 bg-slate-50 border border-slate-100 rounded-2xl text-base focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 outline-none transition-all resize-none font-medium leading-relaxed"
+                      placeholder="Escreva aqui seus resumos..."
+                      className="w-full min-h-[150px] sm:min-h-[200px] p-4 sm:p-6 bg-slate-50 border border-slate-100 rounded-2xl text-sm sm:text-base focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 outline-none transition-all resize-none font-medium leading-relaxed"
                     />
                     <div className="mt-6 flex justify-end">
                       <button
                         onClick={handleSaveNote}
                         disabled={isSavingNote}
-                        className="bg-blue-600 text-white px-8 py-4 rounded-2xl text-xs font-black uppercase tracking-widest hover:bg-blue-700 transition-all flex items-center gap-3 disabled:opacity-50 shadow-xl shadow-blue-100 active:scale-95"
+                        className="bg-blue-600 text-white w-full sm:w-auto px-6 sm:px-8 py-3 sm:py-4 rounded-2xl text-xs font-black uppercase tracking-widest hover:bg-blue-700 transition-all flex items-center justify-center gap-3 disabled:opacity-50 shadow-xl shadow-blue-100 active:scale-95"
                       >
                         {isSavingNote ? <Loader2 className="w-4 h-4 animate-spin"/> : <Check className="w-4 h-4"/>}
                         Salvar Anotações
@@ -783,6 +1267,31 @@ export default function App() {
                     <div className="w-16 h-16 border-4 border-slate-100 border-t-emerald-600 rounded-full animate-spin"></div>
                     <p className="text-slate-400 font-bold uppercase tracking-widest text-[10px]">Gerando Casos Práticos...</p>
                    </div>
+                ) : discursiveQuestions.length === 0 ? (
+                  <div className="p-16 bg-white border border-slate-200 rounded-3xl text-center space-y-6">
+                    <div className={cn(
+                      "w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4",
+                      quotaExceeded ? "bg-amber-100 text-amber-600" : "bg-emerald-50 text-emerald-500"
+                    )}>
+                      {quotaExceeded ? <Sparkles className="w-8 h-8" /> : <BookScale className="w-8 h-8" />}
+                    </div>
+                    <h3 className="text-lg font-bold">
+                      {quotaExceeded ? "Limite Diário Atingido" : "Ops! Algo deu errado."}
+                    </h3>
+                    <p className="text-slate-500 text-sm max-w-md mx-auto">
+                      {quotaExceeded 
+                        ? "O limite de geração de novos casos práticos foi atingido. Temas já acessados continuam disponíveis."
+                        : "Não conseguimos carregar os casos práticos. Tente novamente em instantes."}
+                    </p>
+                    <div className="flex flex-col gap-3">
+                      <button 
+                        onClick={() => fetchDiscursive(selectedTopic, undefined, selectedSubject?.name)} 
+                        className="text-emerald-600 font-bold uppercase text-xs tracking-widest hover:underline"
+                      >
+                        Tentar Novamente
+                      </button>
+                    </div>
+                  </div>
                 ) : (
                   <div className="space-y-8">
                     <div className="bg-white border border-slate-200 rounded-3xl p-8 md:p-12 shadow-sm relative">
@@ -883,13 +1392,35 @@ export default function App() {
                     </div>
                   </div>
                 ) : questions.length === 0 ? (
-                  <div className="p-16 bg-white border border-slate-200 rounded-3xl text-center space-y-4">
-                    <div className="w-16 h-16 bg-rose-50 text-rose-500 rounded-2xl flex items-center justify-center mx-auto mb-4">
-                      <HelpCircle className="w-8 h-8" />
+                  <div className="p-16 bg-white border border-slate-200 rounded-3xl text-center space-y-6">
+                    <div className={cn(
+                      "w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4",
+                      quotaExceeded ? "bg-amber-100 text-amber-600" : "bg-rose-50 text-rose-500"
+                    )}>
+                      {quotaExceeded ? <Sparkles className="w-8 h-8" /> : <HelpCircle className="w-8 h-8" />}
                     </div>
-                    <h3 className="text-lg font-bold">Ops! Algo deu errado.</h3>
-                    <p className="text-slate-500 text-sm">Não conseguimos gerar as questões agora. Verifique sua conexão.</p>
-                    <button onClick={() => setView("topic-list")} className="text-blue-600 font-bold underline">Tentar Novamente</button>
+                    <h3 className="text-lg font-bold">
+                      {quotaExceeded ? "Limite Diário Atingido" : "Ops! Algo deu errado."}
+                    </h3>
+                    <p className="text-slate-500 text-sm max-w-md mx-auto">
+                      {quotaExceeded 
+                        ? "O limite de geração de novas questões foi atingido por hoje. Você pode revisar questões de temas que já abriu anteriormente."
+                        : "Não conseguimos gerar as questões agora. Verifique sua conexão ou tente novamente."}
+                    </p>
+                    <div className="flex flex-col gap-3">
+                      <button 
+                        onClick={() => fetchQuestions(selectedTopic, undefined, selectedSubject?.name)} 
+                        className="text-blue-600 font-bold uppercase text-xs tracking-widest hover:underline"
+                      >
+                        Tentar Novamente
+                      </button>
+                      <button 
+                        onClick={() => setView("topic-list")} 
+                        className="text-slate-400 font-bold uppercase text-xs tracking-widest hover:underline"
+                      >
+                        Voltar para Temas
+                      </button>
+                    </div>
                   </div>
                 ) : showResult ? (
                   <motion.div 
@@ -1043,6 +1574,35 @@ export default function App() {
             Professional Polish Edition v2.4
           </div>
         </footer>
+        {/* Mobile Navbar */}
+        <nav className="lg:hidden fixed bottom-6 left-1/2 -translate-x-1/2 bg-slate-900/90 backdrop-blur-md border border-slate-700/50 rounded-2xl px-2 py-2 flex items-center gap-1 z-50 shadow-2xl">
+          <button 
+            onClick={() => { setView("dashboard"); syncSession("dashboard"); }}
+            className={cn("p-3 rounded-xl transition-all", view === "dashboard" ? "bg-blue-600 text-white" : "text-slate-400")}
+          >
+            <Trophy className="w-5 h-5" />
+          </button>
+          <button 
+            onClick={() => { setView("subject-selection"); syncSession("subject-selection"); }}
+            className={cn("p-3 rounded-xl transition-all", view === "subject-selection" ? "bg-blue-600 text-white" : "text-slate-400")}
+          >
+            <Shield className="w-5 h-5" />
+          </button>
+          <button 
+            onClick={() => { selectedSubject && setView("topic-list"); syncSession("topic-list"); }}
+            disabled={!selectedSubject}
+            className={cn("p-3 rounded-xl transition-all disabled:opacity-20", view === "topic-list" ? "bg-blue-600 text-white" : "text-slate-400")}
+          >
+            <BookOpen className="w-5 h-5" />
+          </button>
+          <div className="w-px h-6 bg-slate-700/50 mx-1"></div>
+          <button 
+            onClick={() => { startCombinedExam(); syncSession("mock-exam"); }}
+            className={cn("p-3 rounded-xl transition-all", view === "mock-exam" && !selectedSubject ? "bg-blue-600 text-white" : "text-slate-400")}
+          >
+            <Sparkles className="w-5 h-5" />
+          </button>
+        </nav>
       </main>
     </div>
   );

@@ -13,6 +13,7 @@ import {
   updateDoc, 
   serverTimestamp,
   arrayUnion,
+  arrayRemove,
   getDocFromServer
 } from "firebase/firestore";
 import { auth, db } from "../lib/firebase";
@@ -70,6 +71,9 @@ interface FirebaseContextType {
   login: () => Promise<void>;
   logout: () => Promise<void>;
   saveProgress: (subjectId: string, topicName: string) => Promise<void>;
+  toggleProgress: (subjectId: string, topicName: string, isCompleted: boolean) => Promise<void>;
+  saveContentCache: (subjectId: string, topicName: string, type: string, content: any) => Promise<void>;
+  getContentCache: (subjectId: string, topicName: string, type: string) => Promise<any>;
   saveLastSession: (view: string, subjectId?: string, topicName?: string) => Promise<void>;
   saveNote: (subjectId: string, topicName: string, note: string) => Promise<void>;
   getProgress: () => Promise<any>;
@@ -124,22 +128,60 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const path = `user_progress/${user.uid}`;
     const progressRef = doc(db, "user_progress", user.uid);
     try {
-      const snap = await getDoc(progressRef);
-      if (!snap.exists()) {
-        await setDoc(progressRef, {
-          userId: user.uid,
-          completedTopics: { [subjectId]: [topicName] },
-          updatedAt: serverTimestamp()
-        });
-      } else {
-        await updateDoc(progressRef, {
-          [`completedTopics.${subjectId}`]: arrayUnion(topicName),
-          updatedAt: serverTimestamp()
-        });
-      }
+      await setDoc(progressRef, {
+        userId: user.uid,
+        [`completedTopics.${subjectId}`]: arrayUnion(topicName),
+        updatedAt: serverTimestamp()
+      }, { merge: true });
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, path);
     }
+  };
+
+  const toggleProgress = async (subjectId: string, topicName: string, isCompleted: boolean) => {
+    if (!user) return;
+    const path = `user_progress/${user.uid}`;
+    const progressRef = doc(db, "user_progress", user.uid);
+    try {
+      await setDoc(progressRef, {
+        userId: user.uid,
+        [`completedTopics.${subjectId}`]: isCompleted ? arrayUnion(topicName) : arrayRemove(topicName),
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, path);
+    }
+  };
+
+  const saveContentCache = async (subjectId: string, topicName: string, type: string, content: any) => {
+    if (!user) return;
+    const cacheId = `${subjectId}_${topicName.replace(/\//g, '_')}_${type}`;
+    const cacheRef = doc(db, "content_cache", cacheId);
+    try {
+      await setDoc(cacheRef, {
+        subjectId,
+        topicName,
+        type,
+        content,
+        updatedAt: serverTimestamp()
+      });
+    } catch (error) {
+      console.error("Cache save error:", error);
+    }
+  };
+
+  const getContentCache = async (subjectId: string, topicName: string, type: string) => {
+    const cacheId = `${subjectId}_${topicName.replace(/\//g, '_')}_${type}`;
+    const cacheRef = doc(db, "content_cache", cacheId);
+    try {
+      const snap = await getDoc(cacheRef);
+      if (snap.exists()) {
+        return snap.data().content;
+      }
+    } catch (error) {
+      console.error("Cache get error:", error);
+    }
+    return null;
   };
 
   const saveLastSession = async (view: string, subjectId?: string, topicName?: string) => {
@@ -179,31 +221,31 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const path = `user_progress/${user.uid}`;
     const progressRef = doc(db, "user_progress", user.uid);
     try {
-      // Use a consistent key format. Replacing spaces to avoid issues in some cases, 
-      // though Firestore keys can have spaces.
       const noteKey = `notes.${subjectId}___${topicName.replace(/\./g, '_')}`;
-      await updateDoc(progressRef, {
+      await setDoc(progressRef, {
+        userId: user.uid,
         [noteKey]: note,
         updatedAt: serverTimestamp()
-      });
+      }, { merge: true });
     } catch (error) {
-      // If document doesn't exist yet, we create it
-      try {
-        await setDoc(progressRef, {
-          userId: user.uid,
-          notes: {
-            [`${subjectId}___${topicName.replace(/\./g, '_')}`]: note
-          },
-          updatedAt: serverTimestamp()
-        }, { merge: true });
-      } catch (innerError) {
-        handleFirestoreError(innerError, OperationType.WRITE, path);
-      }
+      handleFirestoreError(error, OperationType.WRITE, path);
     }
   };
 
   return (
-    <FirebaseContext.Provider value={{ user, loading, login, logout, saveProgress, saveLastSession, saveNote, getProgress }}>
+    <FirebaseContext.Provider value={{ 
+      user, 
+      loading, 
+      login, 
+      logout, 
+      saveProgress, 
+      toggleProgress, 
+      saveContentCache,
+      getContentCache,
+      saveLastSession, 
+      saveNote, 
+      getProgress 
+    }}>
       {children}
     </FirebaseContext.Provider>
   );

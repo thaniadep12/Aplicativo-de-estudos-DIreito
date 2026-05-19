@@ -1,6 +1,12 @@
+export interface Flashcard {
+  front: string;
+  back: string;
+}
+
 export interface Topic {
   name: string;
   description: string;
+  flashcards?: Flashcard[];
 }
 
 export interface Subject {
@@ -16,8 +22,23 @@ export const subjects: Subject[] = [
     name: "Direito Constitucional",
     icon: "Shield",
     topics: [
-      { name: "Teoria da Constituição", description: "Conceito, classificação, elementos e histórico das Constituições Brasileiras." },
-      { name: "Poder Constituinte", description: "Originário, Derivado (Reformador, Decorrente e Revisor) e Poder Constituinte Difuso." },
+      { 
+        name: "Teoria da Constituição", 
+        description: "Conceito, classificação, elementos e histórico das Constituições Brasileiras.",
+        flashcards: [
+          { front: "O que é uma Constituição em sentido sociológico (Lassalle)?", back: "É a soma dos fatores reais do poder que regem uma determinada nação." },
+          { front: "O que é uma Constituição em sentido político (Carl Schmitt)?", back: "É a decisão política fundamental do titular do poder constituinte." },
+          { front: "Como se classifica a Constituição Brasileira de 1988 quanto à estabilidade?", back: "Rígida (exige processo legislativo mais solene para alteração)." }
+        ]
+      },
+      { 
+        name: "Poder Constituinte", 
+        description: "Originário, Derivado (Reformador, Decorrente e Revisor) e Poder Constituinte Difuso.",
+        flashcards: [
+          { front: "Quais as características do Poder Constituinte Originário?", back: "Inicial, ilimitado, autônomo, incondicionado e permanente." },
+          { front: "O que é o Poder Constituinte Derivado Decorrente?", back: "É a capacidade dos Estados-membros de auto-organização por meio de suas próprias Constituições Estaduais." }
+        ]
+      },
       { name: "Hermenêutica Constitucional", description: "Métodos de interpretação, princípios de interpretação e eficácia das normas." },
       { name: "Princípios Fundamentais", description: "Fundamentos, Poderes, Objetivos e Princípios das Relações Internacionais (Arts. 1º a 4º)." },
       { name: "Direitos Individuais e Coletivos", description: "Vida, Liberdade, Igualdade, Segurança e Propriedade (Art. 5º da CF)." },
@@ -45,7 +66,14 @@ export const subjects: Subject[] = [
     name: "Direito Empresarial",
     icon: "Briefcase",
     topics: [
-      { name: "Teoria Geral e Empresa", description: "Conceitos, Empresário Individual, EIRELI (SLU) e Capacidade para Exercer Empresa." },
+      { 
+        name: "Teoria Geral e Empresa", 
+        description: "Conceitos, Empresário Individual, EIRELI (SLU) e Capacidade para Exercer Empresa.",
+        flashcards: [
+          { front: "Quem é considerado empresário pelo Código Civil?", back: "Quem exerce profissionalmente atividade econômica organizada para a produção ou a circulação de bens ou de serviços." },
+          { front: "Quem está impedido de exercer atividade empresária?", back: "Funcionários públicos civis e militares na ativa, magistrados, entre outros previstos em lei." }
+        ]
+      },
       { name: "Registro e Escrituração", description: "Registro Público de Empresas Mercantis, Juntas Comerciais e Livros Obrigatórios." },
       { name: "Estabelecimento Empresarial", description: "Elementos, Natureza Jurídica, Proteção ao Ponto e Contrato de Trespasse." },
       { name: "Propriedade Industrial", description: "Invenções, Modelos de Utilidade, Marcas, Desenho Industrial e Concorrência Desleal." },
@@ -71,7 +99,15 @@ export const subjects: Subject[] = [
     name: "Direito Civil",
     icon: "BookScale",
     topics: [
-      { name: "LINDB", description: "Vigência, Revogação, Vacatio Legis, Obrigatoriedade e Integração da Norma." },
+      { 
+        name: "LINDB", 
+        description: "Vigência, Revogação, Vacatio Legis, Obrigatoriedade e Integração da Norma.",
+        flashcards: [
+          { front: "O que é vacatio legis?", back: "É o intervalo entre a data da publicação da lei e sua entrada em vigor." },
+          { front: "Qual o prazo da LINDB para vigência da lei no país quando não houver disposição contrária?", back: "45 dias." },
+          { front: "O que é repristinação?", back: "É o fenômeno pelo qual uma lei revogada volta a vigorar pela revogação da lei que a revogou (só ocorre se houver disposição expressa)." }
+        ]
+      },
       { name: "Pessoas Naturais", description: "Personalidade, Capacidade, Individualização, Ausência e Direitos da Personalidade." },
       { name: "Pessoas Jurídicas", description: "Classificação, Constituição, Grupos Despersonalizados e Extinção." },
       { name: "Domicílio e Residência", description: "Domicílio da Pessoa Natural e Jurídica, Domicílio Necessário e Eleição." },
